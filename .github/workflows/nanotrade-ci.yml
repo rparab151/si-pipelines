@@ -1,0 +1,23 @@
+name: NanoTrade RTL simulation
+on:
+  push:
+    paths:
+      - "nanotrade-rtl/**"
+      - ".github/workflows/nanotrade-ci.yml"
+  pull_request:
+    paths:
+      - "nanotrade-rtl/**"
+      - ".github/workflows/nanotrade-ci.yml"
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nanotrade-rtl
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install simulator
+        run: sudo apt-get update && sudo apt-get install -y iverilog
+      - name: Run directed and randomized tests
+        run: make test && make random
