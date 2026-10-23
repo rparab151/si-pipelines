@@ -1,4 +1,4 @@
-name: NanoTrade RTL simulation
+name: NanoTrade cocotb / Verilator CI
 on:
   push:
     paths:
@@ -17,7 +17,11 @@ jobs:
         working-directory: nanotrade-rtl
     steps:
       - uses: actions/checkout@v4
-      - name: Install simulator
-        run: sudo apt-get update && sudo apt-get install -y iverilog
-      - name: Run directed and randomized tests
-        run: make test && make random
+      - name: Install Verilator
+        run: sudo apt-get update && sudo apt-get install -y verilator
+      - name: Install cocotb and pytest
+        run: python -m pip install -r requirements.txt
+      - name: RTL lint
+        run: make lint
+      - name: cocotb simulation (directed + randomized)
+        run: make test

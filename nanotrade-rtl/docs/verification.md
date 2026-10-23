@@ -1,19 +1,17 @@
-# Verification plan
+# Verification
 
-## Directed tests
-The self-checking SV bench exercises buy/sell threshold decisions, adjacent accepted quotes, stall stability, neutral/crossed/zero-quantity quotes, sequence gaps, explicit resynchronization, intent quota and sequence wrap.
+## Primary flow: cocotb + Verilator
 
-## Differential testing
-`scripts/random_diff.py` generates seeded stimuli, maintains a Python behavioral model, runs a SystemVerilog trace testbench with Icarus, and compares ready/valid decisions plus observable post-edge state cycle by cycle.
+Install system Verilator, Python and C++ toolchain, then `pip install -r requirements.txt`. `make test` invokes pytest, which builds and runs two independent cocotb simulations.
 
-```bash
-make test
-make random
-python3 scripts/random_diff.py --cycles 3000 --seed 20261021
-```
+- `tests/cocotb_core.py`: directed checks for the current stateful quote-to-order core (configuration, gap/recover, quota, wraparound and stall handling).
+- `tests/cocotb_v2.py`: directed elastic-buffer checks and randomized scoreboard. Python holds pending quotes stable while stalled and models the output as a one-entry queue.
+- `tests/runner_test.py`: cocotb 2.x Python runner configuration using Verilator.
 
-## Assertions
-The RTL has optional `ENABLE_SVA` assertions checking output stability during stalls and quote exclusion on control events. The default CI flow runs the directed and randomized tests rather than relying on a formal SVA tool.
+Run: `make test`, `make lint`, or `make random` (V2 suite).
+
+Legacy SystemVerilog `tb/` and older `scripts/random_diff.py` have been retained for historical reference only; CI no longer runs them.
 
 ## Limitations
-Passing functional simulation would not imply formal completeness, CDC safety, physical timing/area, compliance with market protocols, or production trading safety.
+
+Functional simulation is not formal completeness, CDC verification, timing closure, safety certification or exchange-protocol interoperability. SVA is optional inside the RTL, not enabled by the default cocotb run.

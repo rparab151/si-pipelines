@@ -1,64 +1,59 @@
 # NanoTrade RTL ⚡
 
-**A tiny, reproducible, latency-first SystemVerilog quote-to-order decision engine, designed as a public FPGA/ASIC engineering portfolio project.**
+**Low-latency streaming microarchitecture and cocotb verification study in SystemVerilog.**
 
-> **Scope:** Educational microarchitecture prototype, not a real trading engine.
-> It consumes *normalized, atomic* top-of-book quotes; it does not parse real Ethernet/exchange feeds or transmit exchange orders.
+> Educational RTL experiments, not live trading software. Quotes are already normalized atomic top-of-book snapshots. No proprietary employer IP.
 
-## Key ideas
+## Versions
 
-- **One registered edge** from accepting an actionable quote to an asserted order output; up to **one quote per cycle** when the sink remains ready.
-- **Latency-first fast path:** two parallel price comparators, with thresholds precomputed off the quote path.
-- **Backpressure correctness:** a single-entry elastic output stage supporting same-edge consumption and replacement.
-- **Fail-closed sequence tracking:** sticky sequence-gap fault, explicit recovery, and 32-bit sequence wrap.
-- **Safety guard:** configurable quota, enable gating, zero-quantity and crossed-market filtering.
-- **Reproducible verification:** directed SystemVerilog tests and randomized RTL-vs-Python differential testing.
+- [Stateful core](rtl/nanotrade.sv): sequence-gap detection, explicit recovery, configurable intent quota, registered one-entry output.
+- [V2 elastic-buffer study](rtl/nanotrade_v2.sv): isolates one-entry buffering, selective non-trade bypass, and same-edge dequeue/enqueue. This learning module accepts external `feed_ok` and `risk_ok` guards; it does **not** include the stateful core's sequence-gap or quota tracking.
+
+The planned **V1 combinational bypass** and **V3 two-slot skid buffering** remain design exercises; do not confuse them with implemented modules.
+
+## Verification: cocotb + Verilator
+
+Install Python 3, Verilator, a C++ compiler, and make. Then:
+
+```bash
+cd nanotrade-rtl
+python3 -m pip install -r requirements.txt
+make test
+make lint
+```
+
+`make test` invokes pytest's [cocotb runner](tests/runner_test.py) and Verilator to simulate **both** cores. The Python [V2 tests](tests/cocotb_v2.py) check:
+
+- Accepting an order into an empty register
+- Non-trade quote bypass with an outstanding stalled order
+- No overwrite while stalled, and simultaneous retirement/replacement
+- Consecutive orders at one per cycle
+- Seeded randomized scoreboarding across backpressure, price thresholds and risk changes
+
+The [stateful core test](tests/cocotb_core.py) checks sequence gaps, recovery, quota, zero-quantity and crossed-market cases. GitHub Actions uses the same `make test` command.
+
+**Simulator clarification:** cocotb is the verification framework; Verilator executes the SystemVerilog. The earlier `tb/` and `scripts/random_diff.py` files are legacy examples not run by the default target.
 
 ## Architecture
 
 ```text
- Normalized L1 quote (seq, bid, ask, qty)
-             |
-        valid/ready
-             |
-       sequence guard <--- recover_next_seq
-             |
-   +---------+---------+
-   |                   |
- ask < buy_below    bid > sell_above   <- configured thresholds
-   |                   |
-   +----risk/quota-----+
-             |
-       1-slot order buffer
-             |
-     BUY/SELL intent + ready
+ normalized quote (seq, bid, ask, qty)
+                 |
+            trade decision
+           /              \
+         BUY              SELL
+           \              /
+              risk guard
+                 |
+        one-entry order register
+                 |
+         valid/ready consumer
 ```
 
-## Quick start
+In V2, `quote_ready = !order_valid || order_ready || !trade_hit`. Therefore a non-trading quote can be accepted while an older order remains stalled. An order is visible after its accepting edge and transfers at a later edge when `order_ready` is asserted.
 
-```bash
-sudo apt-get install iverilog
-cd nanotrade-rtl
-make test
-make random
-```
+## Measurement status
 
-The CI job in `../.github/workflows/nanotrade-ci.yml` runs these tests automatically.
+Correct cycle semantics and RTL verification are the initial goals. No measured ASIC/FPGAs Fmax, PPA, or post-route latency figures are claimed.
 
-## Design contract
-
-| Feature | Implementation |
-|---|---|
-| Market input | Atomic normalized single-symbol L1 quote |
-| Prices | 32-bit unsigned integer ticks |
-| Order | One-lot intent; not an exchange order or fill |
-| Latency | Order appears immediately after the accepting clock edge |
-| Throughput | Up to one actionable quote/order intent per cycle with always-ready consumer |
-| Output buffering | One-entry elastic valid/ready register |
-| Recovery | Sticky sequence gap; explicit resynchronization |
-| Quota | Generated intents per configuration epoch |
-| Measured FPGA/ASIC timing or area | **Not yet measured** |
-
-Read [microarchitecture](docs/microarchitecture.md) and [verification](docs/verification.md).
-
-This is an original educational example; no employer-specific proprietary design or datasets are included. MIT license.
+[Microarchitecture](docs/microarchitecture.md) · [Verification notes](docs/verification.md) · [MIT license](LICENSE)

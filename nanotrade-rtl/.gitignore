@@ -3,3 +3,5 @@ build/
 *.vvp
 __pycache__/
 .pytest_cache/
+results.xml
+*.fst
