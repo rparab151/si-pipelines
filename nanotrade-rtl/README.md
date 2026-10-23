@@ -61,8 +61,4 @@ The CI job in `../.github/workflows/nanotrade-ci.yml` runs these tests automatic
 
 Read [microarchitecture](docs/microarchitecture.md) and [verification](docs/verification.md).
 
-## Interview discussion
-
-Why a registered elastic stage rather than a combinational bypass? What does the `order_ready -> quote_ready` combinational path cost in timing? How would a two-entry skid buffer change constraints? What happens to a quote following a gap? Which safety risks remain out of scope?
-
 This is an original educational example; no employer-specific proprietary design or datasets are included. MIT license.
