@@ -1,0 +1,106 @@
+# Chapter 1 — Five FIFO Architectures Using 1RW SRAM
+
+This is an **architecture comparison**, parallel to `nanotrade-rtl/`, not an RTL implementation. No verification or testbenches.
+
+## Problem statement and assumptions
+
+- Single logical FIFO clock, ordered data, finite capacity.
+- The producer presents `wr_valid/wr_data` **without a ready handshake**: writes cannot be backpressured.
+- The consumer uses `rd_valid/rd_ready`; `rd_ready` may deassert for **temporary, bounded stalls**. The FIFO may insert read-valid bubbles.
+- A physical 1RW SRAM supports **one read OR one write per SRAM cycle**.
+- The input arrival envelope, maximum stall duration, and required FIFO depth must be specified to prove losslessness. A finite FIFO cannot accept continuous writes forever if reads are stalled indefinitely. A bounded stall alone does not guarantee safety if input writes can permanently outpace service.
+- Overflow is a system-level contract violation, not an acceptable normal operating mode.
+
+## Option 1 — Single 1RW SRAM, write-priority arbitration
+
+```text
+producer --> [ 1RW SRAM: write wins ] --> [ output register ] --> consumer
+```
+
+Incoming writes always take the SRAM port (subject to available capacity). SRAM reads happen only in write-idle cycles; an output register holds read data while the consumer stalls.
+
+**Pros:** Smallest memory/control footprint; simple single-clock timing; no write-side backpressure; easy ordering.
+
+**Cons:** Sustained writes starve reads; cannot sustain 1 write + 1 read per cycle; balanced traffic requiring SRAM accesses is limited to about 0.5 write + 0.5 read per cycle. Requires burst and occupancy guarantees.
+
+**Best for:** Low-average-rate traffic with enough write-idle slots.
+
+## Option 2 — 1RW SRAM with one input and one output staging register
+
+```text
+producer --> [ input reg ] --> [ 1RW SRAM ] --> [ output reg ] --> consumer
+```
+
+An input register can absorb a short read/write collision. The output register decouples read-ready stalls. A scheduler transfers staged writes to SRAM and prefetches reads, maintaining FIFO order.
+
+**Pros:** Can hide isolated port conflicts; enables empty-FIFO bypass; lowers some interface latency; modest register cost.
+
+**Cons:** One input entry is insufficient for repeated conflicts; sustained bandwidth remains one SRAM operation per cycle; extra valid/occupancy/bypass corner cases. An input register alone does not guarantee a write is accepted when already occupied.
+
+**Best for:** Very short, predictable contention windows.
+
+## Option 3 — Input and output flop FIFOs around one 1RW SRAM
+
+```text
+producer --> [ input FIFO ] --> [ 1RW SRAM ] --> [ output FIFO ] --> consumer
+```
+
+Multi-entry staging absorbs finite write bursts and read stalls. The controller moves data between stages and maintains global FIFO order (older SRAM entries must drain before younger input entries bypass them).
+
+**Pros:** Better burst elasticity; decouples the external interfaces from SRAM arbitration; configurable staging depths; can temporarily sustain 1 write + 1 read per system cycle using buffered data.
+
+**Cons:** Additional flop area and power; complex scheduling, bypass, and occupancy accounting; long-run SRAM throughput unchanged; cannot absorb unlimited overload.
+
+**Best for:** Bursty traffic with known maximum burst/stall bounds.
+
+## Option 4 — Two banked 1RW SRAMs
+
+```text
+                  +--> [ bank 0 ] --+
+producer --> bank |                +--> reorder/read output --> consumer
+             mux  +--> [ bank 1 ] --+
+```
+
+Map successive FIFO entries across two banks (e.g. even/odd). One bank may read while the other writes, provided accesses target different banks.
+
+**Pros:** Potential simultaneous read and write without 2× SRAM clock; aggregate physical port bandwidth increases; can support 1 write + 1 read per cycle under a conflict-free schedule.
+
+**Cons:** Same-bank read/write conflicts remain; interleaving alone does **not** guarantee conflict-free sustained operation; buffering or a conflict-handling schedule may be required; two macros and extra control/routing.
+
+**Best for:** Designs where banking and address/access patterns are favorable.
+
+## Option 5 — Double-pumped 1RW SRAM, logical 1R1W interface
+
+```text
+system clock cycle: |--------- N ---------|--------- N+1 ---------|
+2x SRAM slots:      | write  | read       | write  | read       |
+producer --> [ 1R1W wrapper / phase mux ] --> [ 1RW SRAM @ 2x ] --> output stage --> consumer
+```
+
+A 2× SRAM clock schedules one write slot and one read slot per system cycle, emulating a logical 1R1W port. The wrapper must capture commands, multiplex addresses/data, manage in-flight read responses, and retain read output across stalls.
+
+**Pros:** Potential sustained 1 write + 1 read per system cycle using one SRAM macro; avoids bank conflicts; retains single-port macro density.
+
+**Cons:** SRAM must meet **half the system clock period** (e.g. 2 GHz macro for 1 GHz system); extra clock power and clocking complexity; challenging setup/hold, duty-cycle, phase, read-capture, and read-during-write semantics. A macro's read access time alone does not prove its minimum cycle time. The exact wrapper is macro-specific.
+
+**Best for:** A high-throughput FIFO when a suitable fast SRAM macro and clocking methodology are available.
+
+## Side-by-side comparison
+
+| Option | 1 write + 1 read every system cycle? | Area / power | Timing and control risk | Principal tradeoff |
+|---|---|---|---|---|
+| 1. Write-priority | No | Lowest | Low | Read starvation |
+| 2. One-entry staging | Only brief bursts | Low–moderate | Moderate | Limited elasticity |
+| 3. Flop FIFO staging | Temporarily, bounded by buffers | Higher flop cost | Moderate–high | No sustained SRAM bandwidth gain |
+| 4. Two banks | Conditional; conflicts must be handled | Two macros | Moderate–high | Bank conflicts |
+| 5. Double pump | Potentially yes | One fast macro + wrapper; higher clock power | High | 2× SRAM timing |
+
+## Cycle-level questions before choosing
+
+1. What are the maximum consecutive write burst and maximum downstream read-stall duration?
+2. What is the required sustained arrival/departure rate and maximum tolerated read latency?
+3. Can the SRAM macro operate at 2× system clock, and what is its synchronous-read latency?
+4. For banking, can simultaneous reads and writes ever target the same bank?
+5. What is the worst-case FIFO occupancy under the actual arrival and service envelopes?
+
+**Selection guideline:** Start with Option 1 for simple low-rate traffic; use Option 3 for bounded burst elasticity; consider Options 4 or 5 when true sustained simultaneous read/write throughput is mandatory. None removes the need for finite-capacity traffic assumptions.
