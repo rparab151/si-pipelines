@@ -20,6 +20,15 @@ All projects are implemented with an emphasis on:
 
 ---
 
+## Chapters
+
+### Chapter 1 — Synchronous FIFO using 1RW SRAM
+[Read Chapter 1](sync-fifo-1rw-sram/README.md)
+
+A single-clock FIFO built around one single-port read-or-write SRAM, with cycle-level port arbitration, an output register, and explicit throughput tradeoffs. RTL included; no verification collateral.
+
+---
+
 ## Projects
 
 ### 1. NanoTrade RTL — normalized quote-to-order engine
