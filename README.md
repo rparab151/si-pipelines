@@ -20,6 +20,15 @@ All projects are implemented with an emphasis on:
 
 ---
 
+## Chapters
+
+### Chapter 1 — Five FIFO architectures using 1RW SRAM
+[Read Chapter 1](sync-fifo-1rw-sram/README.md)
+
+Compare write-priority arbitration, single-entry staging, multi-entry staging, two-bank SRAM, and double pumping, with pros and cons. Architecture discussion only.
+
+---
+
 ## Projects
 
 ### 1. NanoTrade RTL — normalized quote-to-order engine
