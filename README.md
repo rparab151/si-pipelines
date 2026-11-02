@@ -22,10 +22,10 @@ All projects are implemented with an emphasis on:
 
 ## Blog
 
-### Article 1 — Five FIFO architectures using 1RW SRAM
+### Article 1 — Six FIFO architectures using 1RW SRAM
 [Read Chapter 1](sync-fifo-1rw-sram/README.md)
 
-Compare write-priority arbitration, single-entry staging, multi-entry staging, two-bank SRAM, and double pumping, with pros and cons. Architecture discussion only.
+Compare write-priority arbitration, single-entry staging, multi-entry staging, two-bank SRAM, double pumping, and 128-bit packed SRAM with prefetch. Includes a [four-way prefetch/packing/banking/double-pumping deep dive](sync-fifo-1rw-sram/prefetch-staging-packing.md) with cycle-level throughput analysis. Architecture discussion only.
 
 ---
 

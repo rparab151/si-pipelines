@@ -1,4 +1,4 @@
-# Chapter 1 — Five FIFO Architectures Using 1RW SRAM
+# Chapter 1 — Six FIFO Architectures Using 1RW SRAM
 
 This is an **architecture comparison**, parallel to `nanotrade-rtl/`, not an RTL implementation. No verification or testbenches.
 
@@ -85,6 +85,22 @@ A 2× SRAM clock schedules one write slot and one read slot per system cycle, em
 
 **Best for:** A high-throughput FIFO when a suitable fast SRAM macro and clocking methodology are available.
 
+## Option 6 — 128-bit packed 1RW SRAM with input packing and output prefetch
+
+```text
+64-bit input --> [pack 2 x 64-bit] --> [128-bit 1RW SRAM] --> [prefetch/unpack] --> 64-bit output
+```
+
+A widened SRAM port transfers **two logical FIFO entries per SRAM access**. One packed write every two system cycles and one packed read every two cycles can deliver one 64-bit enqueue plus one 64-bit dequeue each cycle in a sustained, suitably scheduled steady state. For a single 128-bit 1RW port, the ideal access budget is `0.5 packed write + 0.5 packed read = 1 SRAM operation/system cycle`.
+
+**Pros:** Potential full simultaneous 1-entry/cycle input and output without 2x clock or same-bank conflicts; SRAM storage remains dense; a two-entry prefetch buffer hides the synchronous read access.
+
+**Cons:** A partial input pair needs explicit handling; buffer availability and one-cycle read-return timing must be scheduled carefully; a fully loaded alternating schedule has no spare port cycles to recover from bubbles/stalls. A finite FIFO still needs a bounded write/stall traffic envelope and full/overflow proof.
+
+**Best for:** Sustained balanced 64-bit FIFO traffic when a suitable 128-bit-wide SRAM macro is available.
+
+**Deep dive:** [Prefetch, staging, packing, banking and double pumping](prefetch-staging-packing.md) — cycle-level schedules, port-rate proof, partial-pair and stall edge cases, and a focused four-way trade-off comparison.
+
 ## Side-by-side comparison
 
 | Option | 1 write + 1 read every system cycle? | Area / power | Timing and control risk | Principal tradeoff |
@@ -94,6 +110,7 @@ A 2× SRAM clock schedules one write slot and one read slot per system cycle, em
 | 3. Flop FIFO staging | Temporarily, bounded by buffers | Higher flop cost | Moderate–high | No sustained SRAM bandwidth gain |
 | 4. Two banks | Conditional; conflicts must be handled | Two macros | Moderate–high | Bank conflicts |
 | 5. Double pump | Potentially yes | One fast macro + wrapper; higher clock power | High | 2× SRAM timing |
+| 6. Widened 128-bit pack/prefetch | Potentially yes, with scheduled full-pair traffic | Wider macro + pack/unpack flops | Moderate–high | Partial pairs, prefetch timing and zero port slack |
 
 ## Cycle-level questions before choosing
 
@@ -102,5 +119,6 @@ A 2× SRAM clock schedules one write slot and one read slot per system cycle, em
 3. Can the SRAM macro operate at 2× system clock, and what is its synchronous-read latency?
 4. For banking, can simultaneous reads and writes ever target the same bank?
 5. What is the worst-case FIFO occupancy under the actual arrival and service envelopes?
+6. Can a wider SRAM port pack consecutive FIFO entries, and what happens with odd-length traffic, empty bypass and stalled read output?
 
-**Selection guideline:** Start with Option 1 for simple low-rate traffic; use Option 3 for bounded burst elasticity; consider Options 4 or 5 when true sustained simultaneous read/write throughput is mandatory. None removes the need for finite-capacity traffic assumptions.
+**Selection guideline:** Start with Option 1 for simple low-rate traffic; use Option 3 for bounded burst elasticity; consider Options 4, 5 or 6 when true sustained simultaneous read/write throughput is mandatory. None removes the need for finite-capacity traffic assumptions.
