@@ -1,143 +1,145 @@
-# Prefetch, Staging, Packing, Banking and Double Pumping Around 1RW SRAM
+# A Closer Look at Prefetching, Staging and a 1RW SRAM
 
-This is an architecture-level companion to [Chapter 1](README.md), not RTL or verification. The design problem is a **single-clock, ordered, lossless FIFO** with an input that cannot be backpressured and an output that may temporarily stall.
+[Back to the FIFO article](README.md)
 
-## 0. Contract and terminology
+The main post asks whether a FIFO with one 1RW SRAM can keep up with a producer and consumer running every clock. This page is the scratchpad behind that question: where the memory accesses go, what prefetching actually buys us, and which small timing assumptions can break an apparently perfect schedule.
 
-- Logical input and output width: **64 bits**, at up to **one entry per system clock** in each direction.
-- A conventional 64-bit-wide 1RW SRAM has **one read OR one write port operation per SRAM clock**, not both.
-- Unless stated otherwise, the SRAM has a **registered, one-system-cycle read**. Exact request/response edges and read-during-write behavior depend on the selected macro.
-- The FIFO has `wr_valid/wr_data` but **no `wr_ready`**; the reader uses `rd_valid/rd_ready`. The producer is allowed to pause, but cannot be throttled by the FIFO.
-- Temporary output stalls must be **bounded** and accompanied by a traffic envelope and enough capacity. Even a bounded stall is unsafe if the long-term input rate exceeds service capacity.
-- A bypass transfers **only the oldest** logical entry; it must not overtake older entries in SRAM, an SRAM read in flight, or an output prefetch register.
-- `enqueue` is accepting a new input. `dequeue` is a `rd_valid && rd_ready` transfer. Moving a word between internal buffers is **neither**.
+I'll use a 64-bit FIFO interface at 1 GHz. The producer has no backpressure signal, the consumer can pause temporarily, and the SRAM read is assumed to return data with one cycle of latency. A real macro's latency and read-during-write rules must replace those assumptions before RTL.
 
-## 1. The bandwidth bound (why staging is not magic)
+## First separate *latency* from *bandwidth*
 
-Let the SRAM word width be `M` bits, logical FIFO entry width `W` bits, and packing factor `k = M/W` for integer `k`.
+These are two different problems, even though they show up in the same FIFO waveform.
 
-For traffic that actually traverses SRAM, one logical entry consumes `1/k` **write** and `1/k` **read** port operations on average. At equal sustained enqueue/dequeue rate `r` entries/system-cycle with one SRAM operation/system-cycle:
+An output prefetch register solves a latency problem. If I know the consumer will need word X, I can fetch X before `rd_ready` asks for it. When the consumer is ready, the data is already sitting in a flop.
 
-`2r/k <= 1`
+An input staging register solves a short-term contention problem. If the port is reading this cycle, I can hold the arriving write until the SRAM is free.
 
-- **64-bit 1RW, k=1:** `r <= 0.5` entry/cycle for sustained balanced SRAM traffic. Input/output flops can cover only finite conflicts.
-- **128-bit 1RW, k=2:** `r <= 1` entry/cycle. Perfect packing/scheduling can meet the throughput target, with **zero average port slack**.
-- **Two independent 64-bit 1RW banks:** aggregate two port operations/cycle, but **per-bank conflicts** must still be avoided or hidden.
-- **64-bit 1RW at 2x the system frequency:** two SRAM operations/system-cycle, if the macro and wrapper meet timing.
+Neither change makes the SRAM capable of two operations at once.
 
-This bound applies to entries which require both an SRAM write and read. For empty/near-empty **bypass traffic** that never touches SRAM, the effective demand is lower; bypass does not rescue an arbitrarily deep backlog.
+For an entry that is both written to and read from a conventional 64-bit 1RW SRAM, the total memory work is:
 
-## 2. Approach A — 64-bit 1RW with input staging and output prefetch
+```text
+one SRAM write + one SRAM read = two SRAM accesses / FIFO entry
+```
 
-~~~text
-64-bit producer -> [input skid FIFO] -> [64-bit 1RW SRAM] -> [read response/output FIFO] -> consumer
-                        \______________________________________/
-                               ordered empty/near-empty bypass
-~~~
+If we need a write and a read every cycle forever, this port is short by a factor of two. A thousand staging registers would merely allow a longer interval before the bookkeeping catches up with us.
 
-**Scheduling:** prioritize compulsory input writes before staging overflows, but issue timely prefetch reads while the output buffer has room. Each SRAM cycle still performs **one** of `WRITE`, `READ` or `IDLE`. An output register hides a one-cycle synchronous-read latency and keeps valid data stable under `rd_ready=0`.
+There is a caveat: an empty-FIFO bypass may forward an entry without touching SRAM at all. That's a useful optimization, especially for very small occupancies. It doesn't solve the case where a large backlog is resident in the array.
 
-**Example:** when traffic must traverse SRAM, a six-cycle schedule `W, R, W, R, W, R` services only 3 SRAM writes + 3 reads. Six new entries and six output requests cannot all be satisfied indefinitely by that port.
+## Following a staged 64-bit FIFO for a few cycles
 
-**Good:** low register overhead for one-entry staging; larger flops provide burst/stall elasticity; optional bypass gives excellent empty-FIFO latency.
+Say there are old words in SRAM and the output prefetch register currently holds `X`. New writes keep coming.
 
-**Limitations:** one-entry staging only survives short write/read conflicts; no finite number of flops guarantees continuous 1+1/cycle when **every** entry must visit 64-bit 1RW SRAM. The required staging depth comes from the *worst-case* schedule, not the average. The read-data-in-flight slot counts toward total FIFO occupancy.
+| Cycle | Producer | SRAM slot | Output side |
+|---|---|---|---|
+| 0 | A arrives | Write A | Deliver prefetched X |
+| 1 | B arrives | Read old Y | Output register needs refill |
+| 2 | C arrives | Write B | Deliver Y (after SRAM response) |
+| 3 | D arrives | Read old Z | Refill again |
 
-## 3. Approach B — 128-bit 1RW with packing and two-entry prefetch
+Already, C and D need room in an input stage, and we are doing only two SRAM writes in four cycles. With a sufficiently deep and continuously occupied FIFO, the input backlog grows if everything must be committed to SRAM; if we stop reading to catch up on writes, the output side runs dry instead.
 
-~~~text
-              two 64-bit entries / word                  two entries / fetched word
-64-bit in -> [pack/stage A,B] -> [128-bit 1RW SRAM] -> [read-return + unpack] -> 64-bit out
-                   \_________________ ordered bypass ___________________/
-~~~
+I still like this organization for bursty traffic. It makes sense when the *average* request rate leaves SRAM idle slots and the staging depth is derived from the worst burst. It just isn't a sustained full-rate solution for SRAM-resident words.
 
-**Core idea:** pair consecutive 64-bit entries into one 128-bit write; fetch a pair with one 128-bit read, then serve the pair over two system cycles.
+## Widen the word, not the clock
 
-When the read/write phases align and buffers are prefilled, the port can alternate **one packed write** and **one packed read** per cycle. In a steady interval, a single read or write does **two** logical entries' worth of work.
+Now replace the 64-bit SRAM with a 128-bit one while keeping the external word width at 64 bits.
 
-### Illustrative steady-state timeline
+Two consecutive input entries `A` and `B` form a single SRAM word `{B,A}`. Fetching that word later gives us two output entries, `A` followed by `B`. We trade one port access for two logical transfers.
 
-Preconditions: an older pair X0/X1 is already in the output buffer; A/B is a complete incoming write pair; further older pairs Y0/Y1 and Z0/Z1 are resident in SRAM; output is continuously ready. The SRAM read is one-cycle; fetched data is available by the next cycle's output phase. The table is a *pipeline schedule*, not a claim that the output pairs are consecutive in storage to the concurrently written pairs.
+For packing factor `k = SRAM_width / FIFO_entry_width`, a word flowing through SRAM consumes `1/k` writes and `1/k` reads, on average. For balanced steady-state rate `r` entries per clock:
 
-| System cycle | 1RW SRAM slot | New input | Output accepted | Buffer work |
-|---|---|---|---|---|
-| 0 | WRITE packed A/B | C | X0 | Start collecting C |
-| 1 | READ packed Y0/Y1 | D | X1 | Finish collecting C/D |
-| 2 | WRITE packed C/D | E | Y0 | Capture fetched Y pair; start E |
-| 3 | READ packed Z0/Z1 | F | Y1 | Finish E/F |
-| 4 | WRITE packed E/F | G | Z0 | Capture fetched Z pair |
-| 5 | READ next packed pair | H | Z1 | Continue alternation |
+```text
+SRAM ops per clock = 2r / k
 
-The logical output is in strict FIFO order; the input pairs being written now are **younger** than the already-stored output pairs. An SRAM with a different read pipeline requires rescheduling or a deeper read-return buffer.
+64-bit SRAM:   k = 1  -> r <= 0.5
+128-bit SRAM:  k = 2  -> r <= 1.0
+```
 
-**Benefits:** 1 enqueue + 1 dequeue per system cycle is **possible** for sustained balanced, full-pair traffic without a 2x SRAM clock. Denser SRAM storage than flip-flop staging.
+This is a **necessary bandwidth bound**, not a sufficient proof of an implementation. The scheduler still has to provide data on the right edge.
 
-**Costs and edge cases:**
-- **Odd input count / partial pair:** keep a valid one-entry staging tail, bypass it only when there is no older queued entry, or flush a padded/masked word with explicit valid-lane metadata; a padded word is not automatically a second valid entry.
-- **Read stalled after prefetch:** freeze the oldest output; don't overwrite a full output buffer with the next SRAM read response. Continue accepting input only while physical and staging capacity remain.
-- **SRAM empty, staging nonempty:** bypass the staged oldest entry if legal; no reason to wait for a packed write followed by a packed read.
-- **Full or nearly full FIFO:** physical SRAM word occupancy + uncommitted staged entries + prefetched entries + read responses in flight must all be included in the capacity/reservation calculation.
-- **Bubble or misalignment:** exactly 100% utilization in the simple alternating schedule leaves no slot to catch up; deeper staging, lookahead arbitration and/or idle opportunity may be required to survive disturbances.
-- **Reads/writes to the same physical address:** macro read/write collision semantics must be defined, even though only one SRAM operation issues per cycle.
+### One possible steady-state schedule
 
-**Practical structure:** minimum logical packing is two input lanes and two output lanes, but **read-return timing and arbitration may require separate response and output holding registers**. Do not assume "exactly two flops each side" is a sufficient implementation for every macro.
+Assume an older output pair `X0/X1` has already been prefetched. The input packer holds `A/B`. Additional *older* pairs `Y0/Y1` and `Z0/Z1` are in SRAM. A registered read requested in cycle N is available for use in cycle N+1. The table describes a pipelined schedule with an appropriate SRAM read-response/output arrangement.
 
-### Physical capacity example
+| Cycle | SRAM access | Input accepted | Output accepted |
+|---|---|---|---|
+| 0 | Write A/B | C | X0 |
+| 1 | Read Y0/Y1 | D | X1 |
+| 2 | Write C/D | E | Y0 |
+| 3 | Read Z0/Z1 | F | Y1 |
+| 4 | Write E/F | G | Z0 |
+| 5 | Read next old pair | H | Z1 |
 
-For **32 logical entries in the SRAM array**, use **16 × 128-bit words** (not 32 × 128). Staging and prefetch registers can add physical storage but **do not silently increase the advertised FIFO capacity** unless the interface contract and full/overflow logic count them.
+This is the appealing part: once the pipeline is warm, each side transfers **one 64-bit entry every cycle**, and the SRAM does precisely **one 128-bit operation every cycle**.
 
-## 4. Approach C — Two independent 64-bit 1RW banks
+Notice that the words being written are younger than the words being read. No newer word can jump ahead just because it happens to be in the input packer.
 
-~~~text
-                      +--> [even-address 1RW bank] --+
-producer -> bank map -|                              +-> ordered read/output staging -> consumer
-                      +--> [odd-address  1RW bank] --+
-~~~
+Also notice what the schedule leaves us: zero spare SRAM slots. The next problem is what to do when reality stops looking like this table.
 
-Interleave consecutive entries across bank 0 and bank 1. One bank can perform a read while the other performs a write in the same system cycle. This offers two aggregate accesses, unlike one SRAM macro.
+## The cases I'd draw out before writing RTL
 
-**Critical gotcha:** if both read and write pointers select the **same bank**, that bank sees a conflict, even though the second bank is idle. With naïve even/odd mapping, the difference in bank selection depends on FIFO occupancy parity: an even separation can repeatedly target the same bank while both pointers advance together. Two banks **do not inherently guarantee** steady 1+1/cycle at all occupancies.
+### Only one 64-bit entry is waiting in the packer
 
-**Possible mitigations:** allocate buffered write and read windows, remap/batch addresses, or use banks with different scheduling, but every variant must prove bank conflict freedom or bounded conflict accumulation. Two banks may have worse physical macro overhead and read-mux routing than one widened macro.
+Suppose A arrives and then the producer goes quiet. A isn't a complete 128-bit word, but the consumer may be waiting for it.
 
-## 5. Approach D — Double-pumped 64-bit 1RW SRAM
+We can retain A in a one-entry valid tail and bypass it when no older data exists. Or we can commit a partially valid 128-bit word using a write mask and/or explicit lane-valid state, if the macro and layout allow it. In either case, the second lane must not accidentally become a valid FIFO entry.
 
-~~~text
-system cycle:  |----------- N -----------|----------- N+1 -----------|
-SRAM 2x slots: | WRITE  | READ             | WRITE  | READ             |
-external:      1 x 64-bit write + 1 x 64-bit read per system cycle (when valid)
-~~~
+This case is easy to overlook if the first test always writes an even number of entries.
 
-A wrapper captures logical requests and issues two SRAM operations per system clock, using either a 2x clock or an appropriately engineered clocking scheme. It buffers responses so `rd_valid/rd_ready` remains stable under stalls.
+### The reader stalls just as a read returns
 
-**Benefits:** true potential logical 1R1W service with one 64-bit macro; no even/odd bank conflict and no packing/unpacking alignment.
+Say the output buffer already has an unconsumed pair. A previously issued SRAM read is also returning. If there's nowhere to store the response, we've lost data or overwritten the oldest entry.
 
-**Risks:** SRAM minimum cycle time must meet **half** the system cycle plus clock/jitter/margin requirements. A short read-access time alone is insufficient. Check capture edges, duty-cycle asymmetry, hold, clock distribution/power, SRAM setup/hold, read-data phase crossing, and exact vendor macro behavior.
+The controller needs to reserve response space *at the time it issues the read*, not merely check whether space exists when it comes back. Depending on the macro and staging scheme, this may mean a separate read-response register in addition to the two-entry output buffer.
 
-## 6. Comparison and design-selection table
+When `rd_valid && !rd_ready`, the oldest word presented to the consumer has to stay stable.
 
-| Approach | SRAM port work/system cycle | Sustained 1 enqueue + 1 dequeue? | Extra buffering/control | Key risk |
-|---|---|---|---|---|
-| A. 64-bit 1RW + stages/prefetch | 1 × 64-bit access | **Not for continuously SRAM-resident traffic**; bypass may sustain shallow traffic | Small to large flop buffers, read-return handling | Port backlog |
-| B. 128-bit packed 1RW + prefetch | 1 × 128-bit access | **Possible** under stable pairing/scheduling | Pair pack/unpack, valid lanes, prefetch and read-response buffer | Zero port slack; partial pairs |
-| C. Two 64-bit 1RW banks | Up to 2 × 64-bit, one/bank | **Conditional** on bank-conflict handling | Address interleave, bank arbitration, output-order tracking | Same-bank conflicts |
-| D. Double-pumped 64-bit 1RW | Up to 2 × 64-bit at 2x | **Possible** if SRAM and wrapper meet timing | Clock-phase mux, request/response registers | SRAM 2x timing, power/clock complexity |
+### SRAM becomes empty while the input packer isn't
 
-No option can guarantee lossless infinite input under an unbounded reader stall; specify a bound and prove worst-case occupancy.
+This is where the bypass matters. If the only remaining entry lives in a partial packer, it should not have to wait for a second entry before the consumer can read it.
 
-## 7. Specific microarchitecture review questions
+But "SRAM empty" isn't always enough: perhaps an older word is still in the read-return pipeline or output register. The bypass arbiter must look at **logical age**, not just whether the SRAM's stored-word count happens to be zero.
 
-1. Which entries are physically in *input stage*, *SRAM*, *read in flight*, and *output stage*? Is global occupancy conserved across all moves?
-2. Can `rd_valid && !rd_ready` hold oldest data stable without losing a returning SRAM read?
-3. If SRAM is empty, can input bypass the SRAM without passing older data in the output stage?
-4. If an odd 64-bit entry is left in the 128-bit packer, how is it returned on a drain-to-empty request?
-5. Is the 128-bit read response returned early enough to replace the just-consumed two-entry output pair?
-6. What happens if a stall or arrival bubble breaks a zero-slack alternating read/write schedule?
-7. For two banks, what proof covers collisions when `read_bank == write_bank` for many cycles?
-8. For double pumping, does **minimum SRAM cycle time** (not just access delay) pass at 2x, with hold and clock power included?
-9. Given a maximum read stall `S` cycles and producer rate 1 entry/cycle, is there **at least S entries** of safe unused capacity at stall onset? What additional margin is needed for in-flight accesses and recovery?
-10. Which architecture meets not only peak throughput, but **lossless worst-case throughput** under the specified traffic envelope?
+### The reader stalls for eight clocks
 
-## Recommendation for the exercise
+A continuously writing producer adds eight entries to the FIFO during an eight-cycle stall. The buffer must have that headroom before the stall begins, including any reservations for outstanding reads and pending writes.
 
-Compare A–D analytically first; then choose whether 128-bit packing or double pumping is the better *SRAM-only* throughput upgrade. If 128-bit macros are unavailable, two banks or double pumping are candidates, but each requires a schedule/timing proof. Keep the work architecture-only until RTL is explicitly requested.
+When the consumer resumes at one entry/cycle while the producer continues at one entry/cycle, the backlog **does not shrink**. Occupancy stays at the elevated level. So an eight-cycle stall bound alone isn't enough: the traffic contract also needs opportunities to drain the accumulated entries, or extra service capacity.
+
+### Occupancy bookkeeping crosses storage boundaries
+
+It's tempting to use the SRAM read pointer as the FIFO's dequeue pointer. That is wrong once we prefetch. A word read out of SRAM but waiting in an output register is still logically in the FIFO.
+
+I would track global logical occupancy from external enqueues and accepted dequeues, and separately track what's valid in the packer, SRAM, response path and output stage. A transfer between those storage locations must never look like a second enqueue or dequeue.
+
+## Banking deserves its own trap
+
+Two 64-bit 1RW banks offer two physical operations per system cycle, but only when the operations target different banks.
+
+With simple even/odd interleaving, read and write pointers separated by an **even** occupancy have matching parity. Both can select bank 0 in the same cycle. If you keep accepting and producing one word each cycle, occupancy stays even and the same conflict may persist.
+
+This is the first test I would write for a banked version: not just "does bank 0 read while bank 1 writes?", but "what if both pointers demand bank 0 ten cycles in a row?"
+
+Bank conflict avoidance needs a convincing schedule, buffering argument, or mapping scheme. Counting two ports on a slide isn't sufficient.
+
+## Double pumping moves the problem into timing closure
+
+Two 64-bit SRAM operations per system clock also meet the arithmetic. If the interface runs at 1 GHz, though, the memory has to operate at 2 GHz.
+
+That means checking the macro's **minimum cycle time**, not confusing it with read access delay. There is also the wrapper: address/data selection, capture of the read response, clock phase and duty cycle, setup/hold margins and clock power.
+
+Compared with a 128-bit SRAM, double pumping avoids half-full words. Compared with two banks, it avoids same-bank arbitration. But it only looks simple until someone asks whether the memory compiler actually provides a macro that closes at 2 GHz in this corner.
+
+## The comparison I would make
+
+| Design | Where the extra effective throughput comes from | Limitation |
+|---|---|---|
+| Input staging + output prefetch on 64-bit 1RW | It doesn't add port throughput; it hides temporary conflicts | Buffer backlog if sustained SRAM traffic needs 1R+1W |
+| 128-bit 1RW with pack/unpack | Two 64-bit entries per SRAM operation | Pairing, partial words, prefetch timing, no idle port slots |
+| Two 64-bit 1RW banks | Two independent physical ports | Same-bank read/write conflicts |
+| 64-bit 1RW at 2× clock | Two port cycles per interface cycle | SRAM frequency, power and wrapper timing |
+
+If I were choosing a direction for RTL, I would first get an actual SRAM macro specification and a precise traffic envelope. Then I would do a cycle-by-cycle schedule for **full-rate traffic, a stalled reader, a lone odd entry, and a nearly full FIFO**. Only after those work would I spend time comparing synthesized area or power.
+
+That is the distinction I care about: a diagram that seems capable of one read and one write per cycle, versus an implementation that can demonstrate exactly where both transactions go.
